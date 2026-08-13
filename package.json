@@ -1,0 +1,52 @@
+{
+  "name": "pi-shadow-mind",
+  "version": "0.1.10",
+  "description": "Parallel cognitive runtime for Pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "agent",
+    "multi-agent"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md",
+    "DESIGN.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --sourcemap --external:@earendil-works/* --external:typebox",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm test",
+    "prepack": "npm run verify && npm run build"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "typebox": "^1.3.13",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

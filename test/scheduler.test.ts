@@ -1,0 +1,44 @@
+import { describe, expect, it } from "vitest";
+import { decideHeartbeat } from "../src/scheduler.js";
+import type { ShadowDefinition } from "../src/types.js";
+
+const shadow = (id: string, probability = 1): ShadowDefinition => ({
+  id, name: id, enabled: true, debug: false, activationProbability: probability,
+  activeForModels: ["openai/gpt"], tools: [], prompt: id, filePath: `${id}.md`,
+});
+
+describe("decideHeartbeat", () => {
+  it("rolls independently and caps selected shadows", () => {
+    const rolls = [0.1, 0.1, 0.2, 0.3, 0.8, 0.4];
+    const result = decideHeartbeat({
+      heartbeatProbability: 1 / 3,
+      availableSlots: 2,
+      shadows: [shadow("a"), shadow("b"), shadow("c")],
+      activeShadowIds: new Set(),
+      mainModelId: "openai/gpt",
+      random: () => rolls.shift() ?? 0,
+    });
+    expect(result.activated).toHaveLength(2);
+    expect(result.candidates).toHaveLength(3);
+  });
+
+  it("does nothing when heartbeat misses", () => {
+    const result = decideHeartbeat({ heartbeatProbability: 0.3, availableSlots: 2, shadows: [shadow("a")], activeShadowIds: new Set(), mainModelId: "openai/gpt", random: () => 0.5 });
+    expect(result.activated).toEqual([]);
+  });
+
+  it("reports running-excluded and model-filtered shadows", () => {
+    const result = decideHeartbeat({
+      heartbeatProbability: 1,
+      availableSlots: 2,
+      shadows: [shadow("a"), shadow("b")],
+      activeShadowIds: new Set(["a"]),
+      mainModelId: "other/model",
+      random: () => 0.1,
+    });
+    expect(result.runningExcluded).toEqual(["a"]);
+    expect(result.modelFiltered).toEqual(["b"]);
+    expect(result.activated).toEqual([]);
+    expect(result.candidates).toEqual([]);
+  });
+});

@@ -1,0 +1,328 @@
+import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { basename, dirname, join, normalize, resolve } from "node:path";
+import { Type } from "typebox";
+import {
+  DefaultResourceLoader,
+  SessionManager,
+  SettingsManager,
+  createAgentSession,
+  type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ShadowConfig, ShadowDefinition, ShadowReport } from "./types.js";
+import { DEFAULT_READ_TOOLS } from "./types.js";
+
+/**
+ * Resolve the final tool allowlist for a Shadow run against the main session's
+ * tool registry, per the design contract:
+ *
+ * - the final set is `readOnlyTools defaults + whitelist + report_to_main`;
+ * - names that do not exist in the main session are dropped (ignored) and
+ *   returned as `missing`, while the rest are provided normally;
+ * - the built-in `report_to_main` is always kept.
+ */
+export function resolveShadowTools(
+  whitelist: readonly string[],
+  available: ReadonlySet<string>,
+  defaults: readonly string[] = DEFAULT_READ_TOOLS,
+): { tools: string[]; missing: string[] } {
+  const builtin = new Set(["report_to_main"]);
+  const requested = [...new Set([...defaults, ...whitelist, ...builtin])];
+  const tools: string[] = [];
+  const missing: string[] = [];
+  for (const name of requested) {
+    (builtin.has(name) || available.has(name) ? tools : missing).push(name);
+  }
+  return { tools, missing };
+}
+
+import { buildShadowRequest, buildShadowSystemPrompt } from "./protocol.js";
+import { serializeTrajectory } from "./trajectory.js";
+
+const SELF_PATH = normalize(resolve(fileURLToPath(import.meta.url)));
+
+export interface ShadowRunRequest {
+  shadow: ShadowDefinition;
+  config: ShadowConfig;
+  epoch: number;
+  runId: string;
+  cwd: string;
+  agentDir: string;
+  mainSystemPrompt: string;
+  messages: readonly Record<string, unknown>[];
+  mainModel: Model<any>;
+  /** Final tool allowlist, already resolved against the main session registry. */
+  tools: string[];
+  resolveModel(fullModelId: string): Model<any> | undefined;
+  /** Optional auth check for explicitly configured shadow models (runtime supplies it). */
+  modelAuthOk?(model: Model<any>): boolean;
+  /** The main session's effective thinking level at activation, used as the final fallback. */
+  mainThinkingLevel?: ThinkingLevel;
+  onReport(report: ShadowReport): void;
+}
+
+export interface ToolStat {
+  tool: string;
+  calls: number;
+  failures: number;
+}
+
+export interface ShadowRunResult {
+  reason: "report" | "silent" | "timeout" | "aborted" | "error";
+  error?: string;
+  durationMs: number;
+  toolNames: string[];
+  /** Requested tools that did not materialize in the shadow session. */
+  missingTools: string[];
+  toolCalls: number;
+  toolFailures: number;
+  /** Per-tool usage summary (called tools only). */
+  toolStats: ToolStat[];
+  /** The thinking level actually used for this run (after fallback resolution). */
+  thinkingLevel?: string;
+  sessionFile?: string;
+}
+
+type ShadowSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
+
+interface RunState {
+  reported: boolean;
+  timedOut: boolean;
+  session?: ShadowSession;
+}
+
+function runReason(timedOut: boolean, reported: boolean, aborted: boolean, failed = false): ShadowRunResult["reason"] {
+  if (timedOut) return "timeout";
+  if (reported) return "report";
+  if (aborted) return "aborted";
+  return failed ? "error" : "silent";
+}
+
+/** Unify the three run() return paths so result shape changes touch one place. */
+export function buildRunResult(options: {
+  reason: ShadowRunResult["reason"];
+  error?: string;
+  durationMs: number;
+  session?: ShadowSession;
+  /** Message count before the shadow's own run started; only later tool results are counted. */
+  baseMessageCount: number;
+  missingTools: string[];
+  thinkingLevel?: string;
+}): ShadowRunResult {
+  const { reason, error, durationMs, session, baseMessageCount, missingTools, thinkingLevel } = options;
+  const ownMessages = session ? session.messages.slice(baseMessageCount) : [];
+  const metrics = toolMetrics(ownMessages);
+  return {
+    reason,
+    ...(error !== undefined ? { error } : {}),
+    durationMs,
+    toolNames: session?.getActiveToolNames() ?? [],
+    missingTools,
+    ...metrics,
+    ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+    sessionFile: session?.sessionFile,
+  };
+}
+
+export class ShadowRunner {
+  private readonly controllers = new Map<string, { controller: AbortController; session?: ShadowSession }>();
+
+  async run(request: ShadowRunRequest): Promise<ShadowRunResult> {
+    const started = Date.now();
+    const controller = new AbortController();
+    this.controllers.set(request.runId, { controller });
+    const state: RunState = { reported: false, timedOut: false };
+    let finalReason: ShadowRunResult["reason"] = "error";
+    let sessionManager: SessionManager | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let missingTools: string[] = [];
+    let baseMessageCount = 0;
+    let thinkingLevel: string | undefined;
+    try {
+      const model = resolveRunModel(request);
+      assertShadowModelAuth(model, request);
+      const trajectory = serializeTrajectory(request.messages);
+      assertTrajectoryFits(model, [trajectory]);
+      sessionManager = await createShadowSessionManager(request);
+      const boot = await this.bootstrapSession(request, model, controller, state, sessionManager);
+      state.session = boot.session;
+      missingTools = boot.missingTools;
+      thinkingLevel = boot.thinkingLevel;
+      baseMessageCount = boot.session.messages.length;
+      this.controllers.set(request.runId, { controller, session: boot.session });
+      if (controller.signal.aborted) {
+        finalReason = "aborted";
+        return buildRunResult({ reason: finalReason, durationMs: Date.now() - started, session: boot.session, baseMessageCount, missingTools, thinkingLevel });
+      }
+      const timeoutMs = (request.shadow.timeoutSeconds ?? request.config.defaultShadowTimeoutSeconds) * 1000;
+      timeout = setTimeout(() => {
+        state.timedOut = true;
+        controller.abort();
+        void boot.session?.abort();
+      }, timeoutMs);
+      controller.signal.addEventListener("abort", () => void boot.session?.abort(), { once: true });
+      await boot.session.prompt(buildShadowRequest(trajectory, request.shadow));
+      await boot.session.waitForIdle();
+      finalReason = runReason(state.timedOut, state.reported, controller.signal.aborted);
+      return buildRunResult({ reason: finalReason, durationMs: Date.now() - started, session: boot.session, baseMessageCount, missingTools, thinkingLevel });
+    } catch (error) {
+      finalReason = runReason(state.timedOut, state.reported, controller.signal.aborted, true);
+      return buildRunResult({ reason: finalReason, error: error instanceof Error ? error.message : String(error), durationMs: Date.now() - started, session: state.session, baseMessageCount, missingTools, thinkingLevel });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      sessionManager?.appendCustomEntry("shadow-mind-run-end", { runId: request.runId, reason: finalReason, durationMs: Date.now() - started });
+      state.session?.dispose();
+      this.controllers.delete(request.runId);
+    }
+  }
+
+  /** Build the shadow AgentSession (loader, report tool, allowlist) and validate it. */
+  private async bootstrapSession(
+    request: ShadowRunRequest,
+    model: Model<any>,
+    controller: AbortController,
+    state: RunState,
+    sessionManager: SessionManager,
+  ): Promise<{ session: ShadowSession; missingTools: string[]; thinkingLevel: string }> {
+    const thinkingLevel = resolveRunThinkingLevel(model, request);
+    const settingsManager = SettingsManager.create(request.cwd, request.agentDir);
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: request.cwd,
+      agentDir: request.agentDir,
+      settingsManager,
+      systemPrompt: buildShadowSystemPrompt(request.mainSystemPrompt),
+      // The inherited main system prompt already embeds APPEND_SYSTEM.md,
+      // AGENTS.md and skills; keep the loader from re-discovering them so the
+      // shadow context stays a strict subset (no duplication).
+      appendSystemPrompt: [],
+      agentsFilesOverride: () => ({ agentsFiles: [] }),
+      skillsOverride: (base) => ({ skills: [], diagnostics: base.diagnostics }),
+      extensionsOverride: (base) => ({
+        ...base,
+        extensions: base.extensions.filter((extension) => !isSelfExtension(extension.resolvedPath)),
+      }),
+    });
+    const reportTool = createReportTool((content) => {
+      if (state.reported || controller.signal.aborted) return;
+      state.reported = true;
+      request.onReport({
+        shadowId: request.shadow.id,
+        shadowName: request.shadow.name,
+        content,
+        epoch: request.epoch,
+        runId: request.runId,
+      });
+      queueMicrotask(() => void state.session?.abort());
+    });
+    const tools = [...new Set(request.tools)];
+    const created = await createAgentSession({
+      cwd: request.cwd,
+      agentDir: request.agentDir,
+      model,
+      thinkingLevel,
+      tools,
+      customTools: [reportTool],
+      resourceLoader,
+      sessionManager,
+      settingsManager,
+    });
+    const missingTools = tools.filter((name) => !created.session.getActiveToolNames().includes(name));
+    return { session: created.session, missingTools, thinkingLevel };
+  }
+
+  abort(runId: string): void {
+    this.controllers.get(runId)?.controller.abort();
+  }
+
+  abortAll(): void {
+    for (const { controller } of this.controllers.values()) controller.abort();
+  }
+}
+
+export function toolMetrics(messages: readonly { role?: string; toolName?: string; isError?: boolean }[]): { toolCalls: number; toolFailures: number; toolStats: ToolStat[] } {
+  const stats = new Map<string, ToolStat>();
+  for (const message of messages) {
+    if (message.role !== "toolResult") continue;
+    const tool = message.toolName ?? "unknown";
+    const entry = stats.get(tool) ?? { tool, calls: 0, failures: 0 };
+    entry.calls += 1;
+    if (message.isError) entry.failures += 1;
+    stats.set(tool, entry);
+  }
+  const toolStats = [...stats.values()].sort((a, b) => b.calls - a.calls);
+  return {
+    toolCalls: toolStats.reduce((sum, stat) => sum + stat.calls, 0),
+    toolFailures: toolStats.reduce((sum, stat) => sum + stat.failures, 0),
+    toolStats,
+  };
+}
+
+function createReportTool(onReport: (content: string) => void): ToolDefinition {
+  return {
+    name: "report_to_main",
+    label: "Report to Main",
+    description: "Report a concrete finding or completed result to the main agent and immediately end this Shadow Mind run.",
+    promptSnippet: "Report a useful result to the main agent and end this run",
+    parameters: Type.Object({ content: Type.String({ description: "The complete report for the main agent" }) }),
+    async execute(_toolCallId, params) {
+      const content = (params as { content: string }).content;
+      onReport(content);
+      return { content: [{ type: "text", text: "Report delivered." }], details: {}, terminate: true };
+    },
+  };
+}
+
+async function createShadowSessionManager(request: ShadowRunRequest): Promise<SessionManager> {
+  if (!request.shadow.debug) return SessionManager.inMemory(request.cwd);
+  const directory = join(request.agentDir, "shadow-minds", "logs", request.shadow.id);
+  await mkdir(directory, { recursive: true });
+  const manager = SessionManager.create(request.cwd, directory);
+  manager.appendCustomEntry("shadow-mind-run", { runId: request.runId, epoch: request.epoch, shadowId: request.shadow.id });
+  return manager;
+}
+
+function resolveRunModel(request: ShadowRunRequest): Model<any> {
+  const fullId = request.shadow.runWithModel ?? request.config.defaultShadowModel;
+  if (!fullId) return request.mainModel;
+  const model = request.resolveModel(fullId);
+  if (!model) throw new Error(`shadow model not found: ${fullId}`);
+  return model;
+}
+
+function assertShadowModelAuth(model: Model<any>, request: ShadowRunRequest): void {
+  if (request.modelAuthOk && !request.modelAuthOk(model)) {
+    throw new Error(`shadow model ${model.provider}/${model.id} has no configured auth`);
+  }
+}
+
+/**
+ * Resolve the thinking level for this run: shadow config → plugin default →
+ * the main session's effective level. The first candidate the model supports
+ * (per its thinkingLevelMap; null marks unsupported, a missing key or map means
+ * provider default, i.e. supported) wins. Fails only when none are supported.
+ */
+export function resolveRunThinkingLevel(model: Model<any>, request: ShadowRunRequest): ThinkingLevel {
+  const candidates = [request.shadow.thinkingLevel, request.config.defaultThinkingLevel, request.mainThinkingLevel]
+    .filter((level): level is ThinkingLevel => level !== undefined);
+  for (const level of candidates) {
+    if (model.thinkingLevelMap?.[level] !== null) return level;
+  }
+  throw new Error(`no supported thinking level for ${model.provider}/${model.id} (tried: ${candidates.join(", ") || "none"})`);
+}
+
+function assertTrajectoryFits(model: Model<any>, messages: readonly unknown[]): void {
+  const chars = messages.reduce<number>((sum, message) => sum + (JSON.stringify(message)?.length ?? 0), 0);
+  const estimated = Math.ceil(chars / 2);
+  if (estimated > model.contextWindow) {
+    throw new Error(`trajectory ~${estimated} tokens exceeds ${model.provider}/${model.id} context window (${model.contextWindow})`);
+  }
+}
+
+function isSelfExtension(candidate: string): boolean {
+  const normalized = normalize(resolve(candidate));
+  if (normalized === SELF_PATH) return true;
+  const sourceDirectory = normalize(resolve(dirname(SELF_PATH)));
+  return dirname(normalized) === sourceDirectory && (basename(normalized) === "index.ts" || basename(normalized) === "index.js");
+}

@@ -1,0 +1,11 @@
+node_modules/
+coverage/
+dist/
+release/
+benchmark-results/
+__pycache__/
+*.py[cod]
+*.log
+.env
+.env.*
+!.env.example
