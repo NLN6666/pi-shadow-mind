@@ -1,5 +1,7 @@
 # Pi Shadow Mind
 
+![Pi Shadow Mind — the main agent builds while Shadow Minds review, verify, and maintain](./assets/shadow-mind-hero-v2.png)
+
 **Configurable cognitive cores for Pi.**
 
 **为 Pi 配置多个独立的认知核心。**
