@@ -286,7 +286,7 @@ export class ShadowMindRuntime {
       ...this.recentEvents.slice(-5).map((event) => {
         const failed = event.kind === "run-end" && (event.data?.reason === "error" || event.data?.reason === "timeout");
         const detail = failed ? ` ${event.data?.error ?? event.data?.reason}` : "";
-        return `${event.at.slice(11, 19)} ${event.kind}${detail}`;
+        return `${new Date(event.at).toLocaleTimeString("en-GB", { hour12: false })} ${event.kind}${detail}`;
       }),
       "Commands: /shadow pause | resume | status | hide",
     ];
