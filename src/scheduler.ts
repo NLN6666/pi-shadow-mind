@@ -1,5 +1,14 @@
 import type { HeartbeatDecision, ShadowDefinition } from "./types.js";
 
+/**
+ * Pure conversation turns do not create useful new evidence for repository-oriented
+ * Shadows. Requiring at least one completed Main tool call also prevents a silent
+ * Shadow report response from recursively scheduling more Shadows.
+ */
+export function shouldEvaluateHeartbeat(toolResults: readonly unknown[]): boolean {
+  return toolResults.length > 0;
+}
+
 export function decideHeartbeat(options: {
   heartbeatProbability: number;
   availableSlots: number;

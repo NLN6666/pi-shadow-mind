@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { decideHeartbeat } from "../src/scheduler.js";
+import { decideHeartbeat, shouldEvaluateHeartbeat } from "../src/scheduler.js";
 import type { ShadowDefinition } from "../src/types.js";
 
 const shadow = (id: string, probability = 1): ShadowDefinition => ({
   id, name: id, enabled: true, debug: false, activationProbability: probability,
   activeForModels: ["openai/gpt"], tools: [], prompt: id, filePath: `${id}.md`,
+});
+
+describe("shouldEvaluateHeartbeat", () => {
+  it("suppresses pure conversation turns", () => {
+    expect(shouldEvaluateHeartbeat([])).toBe(false);
+  });
+
+  it("allows turns that completed Main tool work", () => {
+    expect(shouldEvaluateHeartbeat([{ toolName: "read" }])).toBe(true);
+  });
 });
 
 describe("decideHeartbeat", () => {

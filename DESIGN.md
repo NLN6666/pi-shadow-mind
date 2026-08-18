@@ -65,7 +65,7 @@ Shadow 的 Markdown 定义持久存在，但运行实例不保留长期记忆。
 
 `config.json` 保存默认 Shadow 模型、`default_thinking_level`、`heartbeat_probability`、`max_parallel_shadows`、`default_shadow_timeout_seconds` 和 `result_batch_window_ms` 等全局调度配置。`default_shadow_model` 省略时，插件使用激活时的当前 Main 模型；用户也可以配置一个固定默认模型。`default_thinking_level` 的内置默认值为 `low`。
 
-每次 Main `turn_end` 进行 heartbeat 判断前，插件检查并重新加载发生变化的 `config.json`。新配置只影响后续调度和新建实例；已经运行的 Shadow 继续使用启动时取得的配置快照。
+每次符合调度条件的 Main `turn_end` 进行 heartbeat 判断前，插件检查并重新加载发生变化的 `config.json`。纯文本轮次不会进入 heartbeat。新配置只影响后续调度和新建实例；已经运行的 Shadow 继续使用启动时取得的配置快照。
 
 `config.json` 使用 last-known-good 策略。解析失败或字段无效时，插件继续使用最后一次有效配置，在界面及 `/shadow status` 中持续显示错误和当前实际生效值。只有首次加载就不存在有效配置时才使用内置默认值；插件不会自动用默认内容覆盖用户的无效文件。
 
@@ -161,7 +161,7 @@ report_to_main({ content: "..." })
 
 所有 Shadow 都记录轻量运行事件，包括激活、沉默、上报、超时、中止、耗时、执行模型以及工具使用摘要。工具摘要只记录工具名、调用次数和成功/失败统计，不保存参数或结果。事件作为自定义 entries 写入当前 Main Session，随会话持久化和恢复，但不参与 Main 的模型上下文。
 
-每次 Main `turn_end` 的 heartbeat 判断都会写入一条轻量调度事件：先记录 heartbeat 随机值与是否触发；触发后再记录候选 Shadow、各自随机值、概率命中项、模型过滤、运行中排除、并发槽位裁剪和最终激活项。事件不保存 Main 或 Shadow 上下文，用于完整复盘调度决策。
+每次 Main `turn_end` 都会写入一条轻量调度事件。没有工具活动的纯文本轮次记录为跳过；符合条件的轮次记录 heartbeat 随机值与是否触发，触发后再记录候选 Shadow、各自随机值、概率命中项、模型过滤、运行中排除、并发槽位裁剪和最终激活项。事件不保存 Main 或 Shadow 上下文，用于完整复盘调度决策。
 
 `/shadow` 打开统一状态面板，展示当前 Session 的暂停状态、有效与无效 Shadow、正在运行的实例、最近事件和实际生效配置；`/shadow status` 提供对应的摘要视图。第一版面板以观察为主，不内置完整 Markdown 编辑器。
 
@@ -282,18 +282,18 @@ shell({ command: "npm test" }) · 失败，12 项通过、2 项失败
 
 第一版不识别 plan change、uncertainty、risk 等语义事件，也不使用 Gate Model。
 
-每次 Main model call 完成后，按插件配置 `heartbeat_probability` 独立判断是否产生 heartbeat。默认值为 `1/3`：
+Main model call 完成后，只有该 `turn_end` 至少包含一个已完成的工具调用，才按插件配置 `heartbeat_probability` 独立判断是否产生 heartbeat。默认值为 `1/3`：
 
 ```text
-P(heartbeat after model call) = heartbeat_probability
+P(heartbeat after eligible tool-bearing turn) = heartbeat_probability
 default heartbeat_probability = 1 / 3
 ```
 
-实现上以 Main Agent 的每次 `turn_end` 作为一次 model call 边界。带工具调用的中间轮次与不带工具调用的最终回复轮次都参与判断；Shadow AgentSession 自己的 `turn_end` 不参与 Main heartbeat。
+纯文本轮次直接跳过，不消耗随机数，也不启动 Shadow。这会压制普通问答、方案讨论和 Shadow 报告后的纯文本回应产生的无效唤醒。带工具调用的中间轮次仍参与判断，因此 Main 一旦开始读取、验证或修改项目，Shadow 仍可并行介入。Shadow AgentSession 自己的 `turn_end` 不参与 Main heartbeat。
 
-由 `shadow-report` 触发的 Main 补充或修正也属于正常 Main 工作链，其 `turn_end` 继续参与 heartbeat。第一版不限制 Shadow 介入链的深度，允许后续 Shadow 再次检查 Main 的修正；概率、并发上限、超时和结果聚合共同承担节流。
+由 `shadow-report` 触发的 Main 补充或修正只有在实际调用工具时才重新获得 heartbeat 机会，避免纯文本报告与回应形成递归唤醒链。
 
-默认情况下，相邻 heartbeat 的期望间隔为 3 次 model call，但实际间隔保持随机：可能连续发生，也可能较长时间不发生。
+默认情况下，相邻 heartbeat 的期望间隔为 3 个符合条件的工具轮次，但实际间隔保持随机：可能连续发生，也可能较长时间不发生。
 
 第一版直接使用运行时随机数，不提供或持久化随机 seed，也不承诺重放同一调度序列。实际抽样值通过轻量调度事件保留，供事后分析。
 
@@ -318,13 +318,13 @@ available_slots = max_parallel_shadows - running_shadow_count
 
 命中数量超过剩余槽位时，未被随机选中的 Shadow 直接跳过，不进入等待队列，也不保留本次轨迹快照。后续 heartbeat 会基于届时的最新上下文重新判断。
 
-`activation_probability` 表示 heartbeat 已经发生之后，该 Shadow 被选中的基础概率。因此某个 Shadow 在单次 Main model call 后获得激活机会的基础概率为：
+`activation_probability` 表示 heartbeat 已经发生之后，该 Shadow 被选中的基础概率。因此某个 Shadow 在单次符合条件的 Main 工具轮次后获得激活机会的基础概率为：
 
 ```text
 P(activation) = heartbeat_probability × activation_probability
 ```
 
-`activation_probability` 省略时使用默认值 `0.3`。在默认 heartbeat 概率 `1/3` 下，且不考虑并发槽位竞争时，该 Shadow 每次 Main `turn_end` 的基础激活概率约为 `10%`。
+`activation_probability` 省略时使用默认值 `0.3`。在默认 heartbeat 概率 `1/3` 下，且不考虑并发槽位竞争时，该 Shadow 每次符合条件的 Main `turn_end` 的基础激活概率约为 `10%`；纯文本轮次为 `0%`。
 
 当一次 heartbeat 的命中数量超过剩余并发槽位时，并发上限会进一步降低每个命中项的最终激活概率。
 
@@ -417,7 +417,7 @@ Shadow 的临时 AgentSession 不跨激活复用，也不写回记忆。
 
 轻量事件属于运行观测数据，不参与任何 Agent 的上下文。`debug: true` 产生的完整 Session 日志也只用于调试，不会成为后续 Shadow 的记忆。
 
-插件提供 `/shadow pause` 与 `/shadow resume`，只控制当前 Main Session 是否继续产生 heartbeat，不修改全局 Shadow Markdown。执行 pause 时立即中止当前 Session 已运行的 Shadow、清空尚未发送的聚合结果并释放并发槽位；resume 后从后续 Main `turn_end` 恢复概率判断。
+插件提供 `Alt+S` 快捷键以及 `/shadow toggle`、`/shadow pause`、`/shadow resume` 命令，只控制当前 Main Session 是否继续产生 heartbeat，不修改全局 Shadow Markdown。执行 pause 时立即中止当前 Session 已运行的 Shadow、清空尚未发送的聚合结果并释放并发槽位；resume 后从后续 Main `turn_end` 恢复概率判断。暂停时底部状态固定显示 `🐙 Paused`，不展示恒为零的运行数量。
 
 同一个 Shadow 在前一次实例仍运行时不重复激活；不同 Shadow 可以并行运行。
 
@@ -436,6 +436,7 @@ Shadow 的临时 AgentSession 不跨激活复用，也不写回记忆。
 - AI 写入全局 Shadow registry 前取得用户确认；
 - 按 Main 模型筛选 Shadow；
 - 为每个 Shadow 配置执行模型，并支持插件级默认模型；
+- 纯文本 Main 轮次跳过 heartbeat，只在完成工具调用的轮次参与调度；
 - 通过 `heartbeat_probability` 配置随机 heartbeat，默认概率为 `1/3`；
 - 每个 Shadow 按自己的概率参与 heartbeat；
 - 通过 `max_parallel_shadows` 配置最大并行数量；

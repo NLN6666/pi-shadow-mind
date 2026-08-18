@@ -13,7 +13,7 @@ import { registerManagementTools } from "./management-tools.js";
 import { ShadowRegistry } from "./registry.js";
 import { ReportBatcher, formatReportBatch } from "./report-batcher.js";
 import { createRandom } from "./random.js";
-import { decideHeartbeat } from "./scheduler.js";
+import { decideHeartbeat, shouldEvaluateHeartbeat } from "./scheduler.js";
 import { SessionLifetime } from "./session-lifetime.js";
 import { ShadowRunner, resolveShadowTools, type ShadowRunResult } from "./shadow-runner.js";
 import { waitForSettled } from "./shutdown-drain.js";
@@ -73,8 +73,12 @@ export class ShadowMindRuntime {
       this.modelCalls += 1;
     });
 
-    this.pi.on("turn_end", async (_event, ctx) => {
+    this.pi.on("turn_end", async (event, ctx) => {
       this.latestContext = ctx;
+      if (!shouldEvaluateHeartbeat(event.toolResults)) {
+        this.record("heartbeat-skipped", { reason: "no-tool-activity", modelCalls: this.modelCalls });
+        return;
+      }
       await this.onHeartbeat(ctx);
     });
 
@@ -93,18 +97,23 @@ export class ShadowMindRuntime {
 
   private registerUi(): void {
     this.pi.registerCommand("shadow", {
-      description: "Show Shadow Mind status, or pause/resume it",
+      description: "Show Shadow Mind status, or toggle/pause/resume it",
       handler: async (args, ctx) => {
         this.latestContext = ctx;
         const command = args.trim().toLowerCase();
         if (command === "pause") {
-          this.paused = true;
-          this.abortAll("paused");
-          ctx.ui.notify("Shadow Mind paused", "info");
-        } else if (command === "resume") {
-          this.paused = false;
-          ctx.ui.notify("Shadow Mind resumed", "info");
-        } else if (command === "status") {
+          this.setPaused(true, ctx);
+          return;
+        }
+        if (command === "resume") {
+          this.setPaused(false, ctx);
+          return;
+        }
+        if (command === "toggle") {
+          this.setPaused(!this.paused, ctx);
+          return;
+        }
+        if (command === "status") {
           await this.refresh(ctx);
           ctx.ui.notify(this.statusLines().join("\n"), this.diagnostics.length ? "warning" : "info");
         } else if (command === "hide") {
@@ -115,6 +124,14 @@ export class ShadowMindRuntime {
           this.panelVisible = !this.panelVisible;
         }
         this.updateStatus(ctx);
+      },
+    });
+
+    this.pi.registerShortcut("alt+s", {
+      description: "Pause or resume Shadow Mind",
+      handler: (ctx) => {
+        this.latestContext = ctx;
+        this.setPaused(!this.paused, ctx);
       },
     });
 
@@ -266,9 +283,17 @@ export class ShadowMindRuntime {
     this.sessionLifetime.run(() => this.pi.appendEntry("shadow-mind-event", event));
   }
 
+  private setPaused(paused: boolean, ctx: ExtensionContext): void {
+    this.paused = paused;
+    if (paused) this.abortAll("paused");
+    ctx.ui.notify(paused ? "Shadow Mind paused" : "Shadow Mind resumed", "info");
+    this.updateStatus(ctx);
+  }
+
   private updateStatus(ctx: ExtensionContext): void {
     this.sessionLifetime.run(() => {
-      ctx.ui.setStatus("shadow-mind", `🐙 ${this.active.size}${this.paused ? " paused" : ""}${this.diagnostics.length || this.hasRecentRunErrors() ? " !" : ""}`);
+      const warning = this.diagnostics.length || this.hasRecentRunErrors() ? " !" : "";
+      ctx.ui.setStatus("shadow-mind", this.paused ? `🐙 Paused${warning}` : `🐙 ${this.active.size}${warning}`);
       if (this.panelVisible) ctx.ui.setWidget("shadow-mind-panel", this.statusLines(), { placement: "aboveEditor" });
     });
   }
@@ -288,7 +313,7 @@ export class ShadowMindRuntime {
         const detail = failed ? ` ${event.data?.error ?? event.data?.reason}` : "";
         return `${event.at.slice(11, 19)} ${event.kind}${detail}`;
       }),
-      "Commands: /shadow pause | resume | status | hide",
+      "Shortcut: Alt+S toggle · Commands: /shadow toggle | pause | resume | status | hide",
     ];
   }
 }

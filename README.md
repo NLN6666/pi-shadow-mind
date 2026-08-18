@@ -73,7 +73,7 @@ This Shadow is read-only. It reviews the implementation in parallel and reports 
 
 ### How it works
 
-After every main-agent `turn_end`, the extension evaluates a heartbeat. By default, the heartbeat fires with probability `1/3`; eligible Shadow Minds then roll independently using their own activation probabilities, with at most two running concurrently.
+After a main-agent `turn_end` that completed at least one tool call, the extension evaluates a heartbeat. Pure text-only conversation turns are skipped, so ordinary discussion does not wake Shadows. By default, eligible turns fire a heartbeat with probability `1/3`; Shadow Minds then roll independently using their own activation probabilities, with at most two running concurrently.
 
 Each activation starts a fresh temporary session. It inherits the main agent's unchanged system prompt but receives only a sanitized plain-text trajectory: assistant thinking is removed, while tool calls retain compact, deterministic result summaries.
 
@@ -84,7 +84,7 @@ Shadow definitions are ordinary Markdown files. They can be created and adjusted
 ### Installation
 
 ```bash
-pi install npm:pi-shadow-mind@0.1.10
+pi install npm:pi-shadow-mind@0.1.11
 ```
 
 On the first session start, the extension creates:
@@ -98,7 +98,7 @@ On the first session start, the extension creates:
 
 No default Shadow Mind is created. The global runtime timeout defaults to 300 seconds, and individual Shadows may override it with `timeout_seconds`.
 
-Use `/shadow` to toggle the status panel, `/shadow status` for a summary, and `/shadow pause` or `/shadow resume` for the current session. Management tools can list, create, update, enable, disable, and delete Shadow Minds, as well as read or update the global configuration. Every write requires user confirmation.
+Press `Alt+S` to pause or resume Shadow Mind for the current session. The paused footer reads `🐙 Paused` without a redundant zero count. Use `/shadow` to toggle the status panel, `/shadow status` for a summary, or `/shadow toggle`, `/shadow pause`, and `/shadow resume` for command-based control. Management tools can list, create, update, enable, disable, and delete Shadow Minds, as well as read or update the global configuration. Every write requires user confirmation.
 
 For development:
 
@@ -171,7 +171,7 @@ tools: [read, grep]
 
 ### 工作方式
 
-每次主 Agent `turn_end` 后，扩展都会进行一次 heartbeat 判断。heartbeat 默认以 `1/3` 的概率触发，符合条件的 Shadow Minds 再按照各自的激活概率独立抽选，默认最多同时运行两个。
+主 Agent 的一次 `turn_end` 只有在该轮至少完成过一个工具调用时，扩展才进行 heartbeat 判断。纯文本对话轮次会被跳过，因此普通讨论不会唤醒 Shadow。符合条件的轮次默认以 `1/3` 的概率触发 heartbeat，Shadow Minds 再按照各自的激活概率独立抽选，默认最多同时运行两个。
 
 每次激活都会创建一个全新的临时 Session。它继承主 Agent 原封不动的 system prompt，但只接收净化后的文本轨迹：思考内容会被移除，工具调用后仅保留简洁、确定性的结果概述。
 
@@ -182,7 +182,7 @@ Shadow 定义只是普通 Markdown 文件，可以由用户创建和调整，也
 ### 安装
 
 ```bash
-pi install npm:pi-shadow-mind@0.1.10
+pi install npm:pi-shadow-mind@0.1.11
 ```
 
 首次启动 Session 时，扩展会创建：
@@ -196,7 +196,7 @@ pi install npm:pi-shadow-mind@0.1.10
 
 扩展不会默认创建 Shadow Mind。全局默认运行超时为 300 秒，单个 Shadow 可以通过 `timeout_seconds` 覆盖。
 
-使用 `/shadow` 显示或隐藏状态面板，`/shadow status` 查看摘要，`/shadow pause` 和 `/shadow resume` 暂停或恢复当前 Session。管理工具可以查询、创建、更新、启用、禁用和删除 Shadow Mind，以及读取或修改全局配置。所有写操作都需要用户确认。
+按 `Alt+S` 可以暂停或恢复当前 Session 的 Shadow Mind。暂停时底部状态显示为 `🐙 Paused`，不再显示没有信息量的零计数。使用 `/shadow` 显示或隐藏状态面板，`/shadow status` 查看摘要，也可以通过 `/shadow toggle`、`/shadow pause` 和 `/shadow resume` 控制状态。管理工具可以查询、创建、更新、启用、禁用和删除 Shadow Mind，以及读取或修改全局配置。所有写操作都需要用户确认。
 
 开发模式：
 
