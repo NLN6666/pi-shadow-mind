@@ -1,6 +1,7 @@
 node_modules/
 coverage/
 dist/
+.build/
 release/
 benchmark-results/
 __pycache__/

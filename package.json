@@ -1,6 +1,6 @@
 {
   "name": "pi-shadow-mind",
-  "version": "0.1.11",
+  "version": "0.1.13",
   "description": "Parallel cognitive runtime for Pi",
   "type": "module",
   "keywords": [
@@ -10,6 +10,14 @@
     "multi-agent"
   ],
   "license": "MIT",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist",
     "README.md",
@@ -21,8 +29,8 @@
     ]
   },
   "scripts": {
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.build.json && esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js --sourcemap --external:@earendil-works/* --external:typebox",
+    "clean": "node -e \"for(const path of ['dist','.build'])require('node:fs').rmSync(path,{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "verify": "npm run typecheck && npm test",
