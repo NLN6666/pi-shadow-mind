@@ -1,15 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   addUsage,
   formatUsageCost,
   formatUsageDetail,
   formatUsageSummary,
   formatUsageTokens,
-  UsageStore,
   zeroUsage,
   type ShadowUsage,
 } from "../src/usage.js";
@@ -81,112 +76,5 @@ describe("Shadow usage", () => {
     expect(formatUsageDetail("session", sample)).toBe(
       "usage session · 2 requests · 84.7k total · 70k input · 10k output · 4k cache read · 700 cache write · API $0.42",
     );
-  });
-});
-
-describe("UsageStore", () => {
-  let agentDir: string;
-
-  beforeEach(() => {
-    agentDir = mkdtempSync(join(tmpdir(), "shadow-usage-"));
-  });
-
-  afterEach(() => {
-    rmSync(agentDir, { recursive: true, force: true });
-  });
-
-  it("starts missing lifetime data at zero", async () => {
-    const store = new UsageStore(agentDir);
-    await store.initialize();
-
-    expect(store.current).toEqual(zeroUsage());
-    expect(store.error).toBeUndefined();
-  });
-
-  it("loads a valid versioned lifetime document", async () => {
-    const lifetime = usage({ requests: 3, input: 42, totalTokens: 42, cost: { input: 0.12, total: 0.12 } });
-    const path = join(agentDir, "shadow-minds", "usage.json");
-    await mkdir(join(agentDir, "shadow-minds"), { recursive: true });
-    await writeFile(path, `${JSON.stringify({ version: 1, lifetime })}\n`, "utf8");
-
-    const store = new UsageStore(agentDir);
-    await store.initialize();
-
-    expect(store.current).toEqual(lifetime);
-    expect(store.error).toBeUndefined();
-  });
-
-  it("reports invalid or unsupported lifetime data and starts a new in-memory aggregate", async () => {
-    const path = join(agentDir, "shadow-minds", "usage.json");
-    await mkdir(join(agentDir, "shadow-minds"), { recursive: true });
-    await writeFile(path, JSON.stringify({ version: 2, lifetime: {} }), "utf8");
-
-    const store = new UsageStore(agentDir);
-    await store.initialize();
-
-    expect(store.current).toEqual(zeroUsage());
-    expect(store.error).toMatch(/unsupported/);
-  });
-
-  it("persists lifetime data for a new store instance", async () => {
-    const initial = new UsageStore(agentDir);
-    await initial.initialize();
-    await initial.add(usage({ requests: 1, input: 12, output: 3, totalTokens: 15, cost: { input: 0.1, output: 0.02, total: 0.12 } }));
-    await initial.flush();
-
-    const reloaded = new UsageStore(agentDir);
-    await reloaded.initialize();
-
-    expect(reloaded.current).toEqual(usage({ requests: 1, input: 12, output: 3, totalTokens: 15, cost: { input: 0.1, output: 0.02, total: 0.12 } }));
-  });
-
-  it("serializes concurrent additions without losing any aggregate", async () => {
-    const store = new UsageStore(agentDir);
-    await store.initialize();
-    const additions = [
-      usage({ requests: 1, input: 10, totalTokens: 10, cost: { input: 0.1, total: 0.1 } }),
-      usage({ requests: 1, output: 20, totalTokens: 20, cost: { output: 0.2, total: 0.2 } }),
-      usage({ requests: 1, cacheRead: 30, cacheWrite: 40, totalTokens: 70, cost: { cacheRead: 0.3, cacheWrite: 0.4, total: 0.7 } }),
-    ];
-
-    await Promise.all(additions.map((entry) => store.add(entry)));
-    await store.flush();
-
-    const persisted = JSON.parse(await readFile(store.usagePath, "utf8"));
-    expect(persisted.version).toBe(1);
-    expect(persisted.lifetime).toEqual(usage({
-      requests: 3,
-      input: 10,
-      output: 20,
-      cacheRead: 30,
-      cacheWrite: 40,
-      totalTokens: 100,
-      cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
-    }));
-  });
-
-  it("merges concurrent additions from separate stores through the shared usage file", async () => {
-    const first = new UsageStore(agentDir);
-    const second = new UsageStore(agentDir);
-    await Promise.all([first.initialize(), second.initialize()]);
-
-    await Promise.all([
-      first.add(usage({ requests: 1, input: 10, totalTokens: 10, cost: { input: 0.1, total: 0.1 } })),
-      second.add(usage({ requests: 2, output: 20, totalTokens: 20, cost: { output: 0.2, total: 0.2 } })),
-    ]);
-    await Promise.all([first.flush(), second.flush()]);
-
-    const reloaded = new UsageStore(agentDir);
-    await reloaded.initialize();
-
-    const combined = usage({
-      requests: 3,
-      input: 10,
-      output: 20,
-      totalTokens: 30,
-      cost: { input: 0.1, output: 0.2, total: 0.1 + 0.2 },
-    });
-    expect([first.current, second.current]).toContainEqual(combined);
-    expect(reloaded.current).toEqual(combined);
   });
 });

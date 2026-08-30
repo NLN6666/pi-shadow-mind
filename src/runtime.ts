@@ -18,16 +18,18 @@ import { SessionLifetime } from "./session-lifetime.js";
 import { ShadowRunner, resolveShadowTools, type ShadowRunResult } from "./shadow-runner.js";
 import { waitForSettled } from "./shutdown-drain.js";
 import type { RuntimeEvent, ShadowDefinition, ShadowReport } from "./types.js";
+import { UsageStore } from "./usage-store.js";
 import {
   addUsage,
   formatUsageCost,
   formatUsageDetail,
   formatUsageSummary,
   formatUsageTokens,
-  UsageStore,
   zeroUsage,
   type ShadowUsage,
 } from "./usage.js";
+
+const SESSION_TEARDOWN_TIMEOUT_MS = 1_000;
 
 export class ShadowMindRuntime {
   private readonly agentDir = getAgentDir();
@@ -105,10 +107,13 @@ export class ShadowMindRuntime {
       }
       this.epoch += 1;
       this.abortAll("session-shutdown");
-      await waitForSettled({
-        timeoutMs: this.configStore.current.headlessDrainTimeoutSeconds * 1000,
-        isSettled: () => this.active.size === 0,
-      });
+      if (this.active.size > 0) {
+        const result = await waitForSettled({
+          timeoutMs: SESSION_TEARDOWN_TIMEOUT_MS,
+          isSettled: () => this.active.size === 0,
+        });
+        if (!result.settled) this.active.clear();
+      }
       await this.usageStore.flush();
       ctx.ui.setStatus("shadow-mind", undefined);
       ctx.ui.setWidget("shadow-mind-panel", undefined);
@@ -235,9 +240,11 @@ export class ShadowMindRuntime {
   }
 
   private handleRunEnd(runId: string, shadow: ShadowDefinition, result: ShadowRunResult): void {
+    const activeRun = this.active.get(runId);
     this.active.delete(runId);
-    this.sessionUsage = addUsage(this.sessionUsage, result.usage);
     const persisted = this.usageStore.add(result.usage);
+    if (activeRun?.epoch !== this.epoch) return;
+    this.sessionUsage = addUsage(this.sessionUsage, result.usage);
     this.recentRuns.push({ shadowName: shadow.name, completedAt: new Date().toISOString(), result });
     if (this.recentRuns.length > 5) this.recentRuns.shift();
     this.record("run-end", { runId, shadowId: shadow.id, ...result });
